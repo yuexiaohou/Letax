@@ -1,0 +1,131 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath,amssymb,mathtools}
+\usepackage{bm}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{SARIMAX 与 get\_forecast() 预测原理（数学推导）}
+\author{自动生成}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+本文档给出 SARIMAX 模型的数学表述、把 SARIMAX 写成状态空间形式之后基于卡尔曼滤波的预测递推（即 statsmodels 中 \texttt{get\_forecast()} 的理论依据），并给出置信区间与对数变换的偏差修正公式。文中符号说明：$L$ 表示滞后算子（$L y_t = y_{t-1}$），$\mathcal I_t$ 表示时间 $t$ 可用的信息集，$s$ 为季节周期（如月度数据 $s=12$）。
+
+\section{SARIMAX 的差分-多项式表述}
+定义多项式算子：
+\begin{align}
+\phi(L) &= 1 - \phi_1 L - \phi_2 L^2 - \cdots - \phi_p L^p,\\
+\theta(L) &= 1 + \theta_1 L + \theta_2 L^2 + \cdots + \theta_q L^q,\\
+\Phi(L^s) &= 1 - \Phi_1 L^s - \cdots - \Phi_P L^{P s},\\
+\Theta(L^s) &= 1 + \Theta_1 L^s + \cdots + \Theta_Q L^{Q s}.
+\end{align}
+差分算子为
+\begin{align}
+(1-L)^d \quad\text{（非季节差分）},\qquad (1-L^s)^D \quad\text{（季节差分）}.
+\end{align}
+
+包含外生变量 $x_t$ 的 SARIMAX 模型可写为：
+\begin{equation}\label{eq:sarimax}
+\Phi(L^s)\,\phi(L)\,(1-L)^d(1-L^s)^D\,y_t
+\;=\; c \;+\; \Theta(L^s)\,\theta(L)\,\varepsilon_t \;+\; \beta^\top x_t,
+\end{equation}
+其中 $\{\varepsilon_t\}$ 为白噪声，$\mathbb{E}[\varepsilon_t]=0,\ \mathrm{Var}(\varepsilon_t)=\sigma^2$。
+
+\section{状态空间表述}
+为了使用卡尔曼滤波对未来进行条件预测（即 \(\mathbb{E}[y_{t+h}\mid\mathcal I_t]\) 和条件方差），将模型转换为线性状态空间形式。一般写为：
+\begin{description}
+  \item[观测方程（Observation）]
+    \begin{equation}\label{eq:obs}
+      y_t \;=\; Z a_t + d + e_t,\qquad e_t \sim \mathcal{N}(0, H).
+    \end{equation}
+  \item[状态转移方程（State）]
+    \begin{align}\label{eq:state}
+      a_{t+1} &= T a_t + c + R u_t,\qquad u_t\sim\mathcal{N}(0,Q).
+    \end{align}
+\end{description}
+这里 $a_t$ 为状态向量（包含差分后的滞后项、MA 的状态等），$Z$、$T$、$R$、$Q$、$H$、$c$、$d$ 是由 ARIMA/SARIMA 的多项式与观测/差分结构决定的矩阵和向量。如果带外生变量 $\beta^\top x_t$，则观测方程变为
+\begin{equation}
+y_t = Z a_t + d + \beta^\top x_t + e_t.
+\end{equation}
+
+\section{卡尔曼滤波（递推）}
+假定在时间 $t$ 完成滤波（已计算到 $t$ 的后验），记
+\begin{align}
+\hat a_{t|t} &:= \mathbb{E}[a_t\mid\mathcal I_t],\\
+P_{t|t} &:= \mathrm{Var}(a_t\mid\mathcal I_t).
+\end{align}
+卡尔曼预测与更新步骤如下。
+
+\subsection{时间更新（Predict）}
+\begin{align}
+\hat a_{t+1|t} &= T \,\hat a_{t|t} + c, \label{eq:predict_state}\\
+P_{t+1|t} &= T\,P_{t|t}\,T^\top + R\,Q\,R^\top. \label{eq:predict_cov}
+\end{align}
+
+\subsection{观测更新（Update）}
+设观测预测方差（innovation variance）为
+\begin{equation}
+F_{t+1} = Z\,P_{t+1|t}\,Z^\top + H.
+\end{equation}
+卡尔曼增益为
+\begin{equation}
+K_{t+1} = P_{t+1|t}\,Z^\top\,F_{t+1}^{-1}.
+\end{equation}
+则更新公式为
+\begin{align}
+\hat a_{t+1|t+1} &= \hat a_{t+1|t} + K_{t+1}\bigl(y_{t+1} - Z\hat a_{t+1|t} - d - \beta^\top x_{t+1}\bigr),\\
+P_{t+1|t+1} &= (I - K_{t+1} Z)\,P_{t+1|t}.
+\end{align}
+
+\section{多步预测（$h$ 步）--- get\_forecast 的递推本质}
+从最后观测时刻 $t$ 的滤波后验 $\hat a_{t|t}$、$P_{t|t}$ 出发，做 $h$ 步递推得到状态的 $h$ 步预测：
+\begin{align}
+\hat a_{t+h|t} &= T^h \hat a_{t|t} + \sum_{j=0}^{h-1} T^{j} c, \label{eq:ah}\\
+P_{t+h|t} &= T\,P_{t+h-1|t}\,T^\top + R Q R^\top,\qquad h\ge 1, \label{eq:Ph}
+\end{align}
+由此把状态预测映射回观测得到：
+\begin{align}
+\mu_{t+h|t} &:= \mathbb{E}[y_{t+h}\mid\mathcal I_t] = Z\,\hat a_{t+h|t} + d + \beta^\top x_{t+h},\label{eq:mu}\\
+\Sigma_{t+h|t} &:= \mathrm{Var}(y_{t+h}\mid\mathcal I_t) = Z\,P_{t+h|t}\,Z^\top + H. \label{eq:sigma}
+\end{align}
+上述 $\mu_{t+h|t}$ 即为点预测（预测均值）；$\Sigma_{t+h|t}$ 用于构造置信区间。
+
+\section{置信区间（Confidence Interval）}
+通常在大样本与近似正态假设下，用标准正态分位点构造 $1-\alpha$ 置信区间：
+\begin{equation}\label{eq:ci}
+\mathrm{CI}_{1-\alpha}(y_{t+h}) \;=\; \bigl[\;\mu_{t+h|t} \pm z_{1-\alpha/2}\,\sqrt{\Sigma_{t+h|t}}\;\bigr],
+\end{equation}
+例如 95\% 区间取 $z_{0.975}\approx 1.96$。
+
+\section{关于 MA 成分与未来扰动}
+移动平均（MA）项意味着观测包含过去若干期的误差线性组合。但在条件预测的意义上，未来的创新项 $\varepsilon_{t+1},\dots,\varepsilon_{t+h}$ 的条件期望均为 0，因此在点预测中不出现未知扰动的均值项；它们对预测不确定性（方差）有贡献，这一点在方差递推 \eqref{eq:Ph}、\eqref{eq:sigma} 中体现。
+
+\section{外生变量（exog）的处理}
+若在拟合时模型包含外生变量 $\{x_t\}$，则做预测时必须提供未来的外生变量序列 $\{x_{t+1},\dots,x_{t+h}\}$，因为预测均值 \eqref{eq:mu} 包含 $\beta^\top x_{t+h}$。若缺失或与训练时维数不匹配，将导致无法正确预测或报错。
+
+\section{对数变换与偏差校正}
+若对原始序列做对数变换建模（以 $z_t=\log Y_t$ 建模），得到对数尺度的预测 $\hat z_{t+h|t}$ 和方差 $\sigma^2_{z,t+h|t}=\mathrm{Var}(z_{t+h}\mid\mathcal I_t)$。直接反变换 $\exp(\hat z_{t+h|t})$ 不是 $\mathbb{E}[Y_{t+h}\mid\mathcal I_t]$ 的无偏估计。若近似假设 $z_{t+h}\mid\mathcal I_t\sim\mathcal N(\hat z_{t+h|t},\sigma^2_{z,t+h|t})$，则：
+\begin{equation}\label{eq:log_bias}
+\mathbb{E}[Y_{t+h}\mid\mathcal I_t] \;=\; \mathbb{E}[e^{z_{t+h}}\mid\mathcal I_t]
+\;\approx\; \exp\!\Bigl(\hat z_{t+h|t} + \tfrac{1}{2}\sigma^2_{z,t+h|t}\Bigr).
+\end{equation}
+因此若需估计原始刻度的条件期望，可使用式 \eqref{eq:log_bias} 做偏差校正。置信区间也应相应在对数尺度构造后再反变换，或通过蒙特卡洛/bootstrap 方法估计更可靠的区间。
+
+\section{实现与常见注意点}
+\begin{itemize}
+  \item \textbf{索引与频率：} 为了方便把预测结果与时间对齐，建议历史序列使用 \texttt{DatetimeIndex} 且带有频率（例如 'MS'）。如果没有频率，可以手动构造预测的时间索引。
+  \item \textbf{外生变量长度：} 若拟合时使用 exog，则预测时必须提供未来 exog 的值，且维度需匹配（步数与列数）。
+  \item \textbf{置信区间的可靠性：} 若残差存在显著异方差或非正态性，基于正态假设的区间可能不准确。可考虑 bootstrap 或针对方差建模（如 GARCH）改进区间估计。
+  \item \textbf{数值稳定性：} 在拟合高阶模型或参数搜索时可能遇到收敛问题，可以尝试更小的候选空间、不同优化器或使用 \texttt{auto\_arima} 进行自动化建模。
+\end{itemize}
+
+\section{结论}
+\texttt{get\_forecast(steps=h)} 的底层原理是：在已估计的线性状态空间模型框架下，基于卡尔曼滤波得到最后时刻的状态后验 $\hat a_{t|t}$ 和协方差 $P_{t|t}$，然后用状态转移方程递推出 $h$ 步的状态预测 $\hat a_{t+h|t}$ 及其协方差 $P_{t+h|t}$，再通过观测方程映射为观测变量的条件期望与条件方差，最后基于近似正态性构造置信区间。对数变换时需注意反变换的偏差校正（式 \eqref{eq:log_bias}）。
+
+\vspace{1em}
+如需我把此内容整理为更短的幻灯片摘要、或把关键公式单独导出为 PDF/图片（用于报告），或把这些公式与代码对应起来（例如将 $\hat a_{t|t},P_{t|t}$ 在你的拟合结果中打印出来以验证数值），请告诉我你的偏好。
+\end{document}
